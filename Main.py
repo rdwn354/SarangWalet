@@ -1,215 +1,183 @@
-from classess import classNames
 from ultralytics import YOLO
-import Jetson.GPIO as GPIO
-import pyvisa as visa
-import random
-import shutil
-import time
-import math
 import cv2
-import os
+import pyvisa as visa
+import time
+import threading
+import subprocess 
+import math
+import imutils
+from classess import classNames
 
-total_detected_objects = 0   # Total objek yang terdeteksi
-speed = 0                    # Kecepatan deteksi
+# Inisialisasi variabel-variabel
+loop_jalan = False               # Status loop deteksi aktif/non-aktif
+program_running = True           # Status program berjalan/berhenti
+total_detected_objects = 0       # Total objek yang terdeteksi
+speed = 0                         # Kecepatan deteksi
 
-# Pin definition
-IN1 = 37
-IN2 = 35
-IN3 = 33
-IN4 = 31
+# Deklarasi array kelas objek
+x = classNames
+Y = classNames
 
-stepSequence = [
-    [1, 0, 0, 0],
-    [1, 1, 0, 0],
-    [0, 1, 0, 0],
-    [0, 1, 1, 0],
-    [0, 0, 1, 0],
-    [0, 0, 1, 1],
-    [0, 0, 0, 1],
-    [1, 0, 0, 1],
-]
+# Jenis font untuk teks pada gambar
+font = cv2.FONT_HERSHEY_SIMPLEX
 
-x = ["putih beras", "putih kuning"]
-y = ["sudut", "patahan", "bakpao", "oval", "mangkok"]
+# Inisialisasi komunikasi serial
 ports = visa.ResourceManager()
-print(ports.list_resources())
+print(ports.list_resources())     # Daftar sumber daya serial yang tersedia
 serialPort = ports.open_resource('ASRL/dev/ttyUSB0::INSTR')
-serialPort.baud_rate = 9600
+serialPort.baud_rate = 9600       # Pengaturan baud rate
 
-folder_name = "photos"
+# Inisialisasi model YOLO
+model1 = None
+model2 = None
 
-# Pin Setup
-GPIO.setmode(GPIO.BOARD)
-GPIO.setup(IN1, GPIO.OUT)
-GPIO.setup(IN2, GPIO.OUT)
-GPIO.setup(IN3, GPIO.OUT)
-GPIO.setup(IN4, GPIO.OUT)
+# Inisialisasi kamera
+cap = cv2.VideoCapture(0)
 
-def stepper(step):
-    GPIO.output(IN1, stepSequence[step][0])
-    GPIO.output(IN2, stepSequence[step][1])
-    GPIO.output(IN3, stepSequence[step][2])
-    GPIO.output(IN4, stepSequence[step][3])
+# Fungsi untuk membaca dan proses data serial
+def read_serial():
+    global loop_jalan, program_running, model1, model2
 
-def run_stepper(delay, steps):
-    for i in range(steps):
-        for step in range(len(stepSequence)):
-            stepper(step)
-            time.sleep(delay)
-
-def ambil_gambar():
-    # Create the folder if it doesn't exist
-    if not os.path.exists(folder_name):
-        os.makedirs(folder_name)
-
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        print("Failed to open camera")
-        return
-
-    try:
-        for i in range(6):
-            # Read a frame from the camera
-            ret, frame = camera.read()
-            if not ret:
-                print(f"Failed to capture image {i+1}")
-                continue
-
-            # Save the photo with a unique name in the folder
-            file_name = os.path.join(folder_name, f"photo_{i+1}.jpg")
-            cv2.imwrite(file_name, frame)
-            print(f"Photo {i+1} has been saved as {file_name}")
-
-            # Run the stepper motor
-            run_stepper(0.001, 60)
-
-    except KeyboardInterrupt:
-        pass
-
-    finally:
-        camera.release()
-        cv2.destroyAllWindows()
-        GPIO.cleanup()
-
-def deteksi_warna():
-    model = YOLO("/home/jetson/JetsonYolov5/yolov8/content/runs/detect/train/weights/best.pt")  
-    global total_detected_objects    
-    class_confidences = {class_name: [] for class_name in x}
-    class_counts = {class_name: 0 for class_name in x}
-    detection_output = model.predict(source="/home/jetson/photos/", conf=0.25, stream=True) 
-
-    for r in detection_output:
-        boxes = r.boxes
-        class_objects = {name: 0 for name in x}
-        for box in boxes:
-            conf1 = math.ceil((box.conf[0] * 100)) / 100
-            cls1 = int(box.cls[0])
-            class_name = x[cls1]
-            class_confidences[class_name].append(conf1)
-            class_objects[class_name] += 1
-        
-    detected_classes = [f"{conf1}{count} {class_name}" for class_name, count in class_objects.items() if count > 0]
-    total_detected_objects = sum(class_objects.values())
-    class_info = " ; ".join(detected_classes)
-        
-    class_avg_confidences = {}
-    for class_name, confidences in class_confidences.items():
-        if confidences:
-            total_confidence = sum(confidences)
-            count = class_objects[class_name]
-            avg_confidence = total_confidence / count
-            class_avg_confidences[class_name] = avg_confidence
-
-    for class_name, avg_confidence in class_avg_confidences.items():
-        print(f"{avg_confidence:.2f} {class_name}")
-        
-    serialPort.write_raw(f'n0.val={total_detected_objects}'.encode('utf-8'))
-    serialPort.write_raw(b'\xff\xff\xff')
-
-    serialPort.write_raw(f't3.txt="{class_info}"'.encode('utf-8'))
-    serialPort.write_raw(b'\xff\xff\xff')    
-
-def deteksi_bentuk():        
-    model1 = YOLO ("/home/jetson/JetsonYolov5/content/runs/detect/train/weights/best.pt")
-    detection_output1 = model1.predict(source="/home/jetson/photos/", conf=0.25, stream=True) 
-    global total_detected_objects    
-    class_confidences = {class_name: [] for class_name in x}
-    class_counts = {class_name: 0 for class_name in x}
-
-    for r in detection_output1:
-        boxes = r.boxes
-        class_confidences = {class_name: [] for class_name in x}
-        class_objects = {name: 0 for name in x}
-        
-        for box in boxes:
-            conf1 = math.ceil((box.conf[0] * 100)) / 100
-            cls1 = int(box.cls[0])
-            class_name = y[cls1]
-            class_confidences[class_name].append(conf1)
-            class_objects[class_name] += 1
-        
-    detected_classes = [f"{conf1}{count} {class_name}" for class_name, count in class_objects.items() if count > 0]
-    total_detected_objects = sum(class_objects.values())
-    class_info = " ; ".join(detected_classes)
-    
-    class_avg_confidences = {}
-    for class_name, confidences in class_confidences.items():
-        if confidences:
-            total_confidence = sum(confidences)
-            count = class_objects[class_name]
-            avg_confidence = total_confidence / count
-            class_avg_confidences[class_name] = avg_confidence
-
-    for class_name, avg_confidence in class_avg_confidences.items():
-        print(f"{avg_confidence:.2f} {class_name}")
-    
-    serialPort.write_raw(f't2.txt="{class_info}"'.encode('utf-8'))
-    serialPort.write_raw(b'\xff\xff\xff')
-
-try:
-    while True:
+    while program_running:  # Melanjutkan membaca data serial selama program berjalan
         read = serialPort.read_bytes(serialPort.bytes_in_buffer)
         print(read)
-        serialPort.write_raw(f't0.txt="TEKAN TOMBOL START"'.encode('utf-8'))
+
+        # Mengecek apakah tombol "stop" ditekan
+        if read == b'e\x00\x04\x01\xff\xff\xff':
+            if loop_jalan:  # Jika loop deteksi sedang berjalan
+                loop_jalan = False
+                if model1 is not None:
+                    model1.close()
+                if model2 is not None:
+                    model2.close()
+                # Menghentikan program
+                program_running = False
+
+        time.sleep(1)  # Menyesuaikan durasi tidur sesuai kebutuhan
+
+# Fungsi untuk menjalankan model YOLO pertama
+def loop_model1():
+    for result1 in results1:
+        boxes1 = result1.boxes
+
+        # Inisialisasi kamus untuk menghitung objek dari setiap kelas
+        class_objects = {name: 0 for name in x}
+
+        # Memproses dan menghitung objek untuk setiap objek yang terdeteksi
+        for box in boxes1:
+            x1, y1, x2, y2 = box.xyxy[0]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            conf0 = math.ceil((box.conf[0] * 100)) / 100
+            cls0 = int(box.cls[0])
+            class_name = x[cls0]
+            class_objects[class_name] += 1  # Menambahkan hitungan kelas
+
+        # Memfilter kelas dengan jumlah objek 0
+        detected_classes = [f"{conf0}{count} {class_name}" for class_name, count in class_objects.items() if count > 0]
+
+        #detected_classes = [f"{conf0}{count} {class_name}" for class_name, count in class_objects.items() if count > 0]
+
+        total_detected_objects = sum(class_objects.values())
+
+        # Membangun string info kelas
+        class_info = " ; ".join(detected_classes)
+        
+        # Menampilkan kelas dan kepercayaan
+        cv2.putText(frame, f'Kelas: {x[cls0]}, Kepercayaan: {conf0}', (x1, y1), font, 1, (0, 255, 0))
+
+        # Mengirim hitungan untuk kelas yang terdeteksi ke display serial
+        serialPort.write_raw(f'n0.val={total_detected_objects}'.encode('utf-8'))
         serialPort.write_raw(b'\xff\xff\xff')
-        
-        if read == b'e\x00\x07\x01\xff\xff\xff':
-            start_time = time.time()
-            serialPort.write_raw(f't0.txt="MENGAMBIL FOTO..."'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            ambil_gambar()
-            serialPort.write_raw(f't0.txt="SCANNING BENTUK..."'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            deteksi_bentuk()
-            serialPort.write_raw(f't0.txt="SCANNING WARNA..."'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            deteksi_warna()
-            random_number = random.randint(2, 12)
-            serialPort.write_raw(f't1.txt="{random_number}%"'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            serialPort.write_raw(f't0.txt="MENAMPILKAN HASIL..."'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            end_time = time.time()
-            inference_speed = (end_time - start_time) * 100
-            rounded = round(inference_speed, 0)
-            milliseconds_integer = int(rounded)
-            serialPort.write_raw(f'n1.val={milliseconds_integer}'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
-            print(rounded)
-            serialPort.write_raw(f't0.txt="TEKAN TOMBOL START"'.encode('utf-8'))
-            serialPort.write_raw(b'\xff\xff\xff')
+
+        serialPort.write_raw(f't1.txt="{class_info}"'.encode('utf-8'))
+        serialPort.write_raw(b'\xff\xff\xff')
+
+# Fungsi untuk menjalankan model YOLO kedua
+def loop_model2():
+    for result2 in results2:
+        boxes2 = result2.boxes
+
+        # Inisialisasi kamus untuk menghitung objek dari setiap kelas
+        class_objects = {name: 0 for name in x}
+
+        # Memproses dan menghitung objek untuk setiap objek yang terdeteksi
+        for box in boxes2:
+            x1, y1, x2, y2 = box.xyxy[0]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            cv2.rectangle(frame1, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            conf1 = math.ceil((box.conf[0] * 100)) / 100
+            cls1 = int(box.cls[0])
+            class_name = Y[cls1]
+            class_objects[class_name] += 1  # Menambahkan hitungan kelas
+
+            # Memfilter kelas dengan jumlah objek 0
+            detected_classes = [f"{conf1}{count} {class_name}" for class_name, count in class_objects.items() if count > 0]
+
+            # Membangun string info kelas
+            class_info = " ; ".join(detected_classes)
             
-            shutil.rmtree(folder_name)
-            print(f"The folder {folder_name} and its contents have been deleted.")
-        
-        time.sleep(1)
-        
+            # Menampilkan kelas dan kepercayaan
+            cv2.putText(frame1, f'Kelas: {Y[cls1]}, Kepercayaan: {conf1}', (x1, y1), font, 1, (0, 255, 0))
+
+            # Mengirim hitungan untuk kelas yang terdeteksi ke display serial
+            serialPort.write_raw(f't2.txt="{class_info}"'.encode('utf-8'))
+            serialPort.write_raw(b'\xff\xff\xff')
+
+try:
+    # Memulai thread untuk membaca dan memproses data serial
+    serial_thread = threading.Thread(target=read_serial)
+    serial_thread.start()
+
+    while program_running:  # Loop tak terbatas selama program berjalan
+
+        # Membaca data dari port serial
+        read = serialPort.read_bytes(serialPort.bytes_in_buffer)
+        print(read)
+
+        # Mengecek apakah tombol "start" ditekan
+        if read == b'e\x00\x05\x01\xff\xff\xff':
+            if not loop_jalan:  # Jika loop belum berjalan
+                loop_jalan = True
+                # Menginisialisasi model YOLO
+                model1 = YOLO("yolov8s.pt")
+                model2 = YOLO("yolov8n.pt")
+                serialPort.write_raw(f't0.txt="PROGRAM BERJALAN..."'.encode('utf-8'))
+                serialPort.write_raw(b'\xff\xff\xff')
+
+                # Melakukan tindakan saat loop berjalan
+        if loop_jalan and model1 is not None and model2 is not None:  # Mengecek jika kedua model sudah diinisialisasi 
+            ret, frame = cap.read()
+            frame1 = frame.copy()
+            if not ret:
+                break
+            frame = imutils.resize(frame, width=1000, height=750)
+            results1 = model1(frame, stream=True)
+            results2 = model2(frame1, stream=True)
+            start_time = time.time()
+            loop_model1()
+            loop_model2()
+            end_time = time.time()
+            inference_speed = (end_time - start_time) * 1000
+            rounded = round(inference_speed, 2)
+            serialPort.write_raw(f't3.txt="{rounded}"'.encode('utf-8'))
+            serialPort.write_raw(b'\xff\xff\xff')
+    
+            cv2.imshow("jenis", frame)
+            cv2.imshow("warna", frame1)
+
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+
 except KeyboardInterrupt:
-    print("Ctrl+C detected. Exiting...")
-    shutil.rmtree(folder_name)
+    print("Ctrl+C terdeteksi. Keluar...")
 
 finally:
     serialPort.write_raw(f't0.txt="PROGRAM BERHENTI"'.encode('utf-8'))
     serialPort.write_raw(b'\xff\xff\xff')
+    serial_thread.join()  # Menunggu thread serial selesai
     serialPort.close()
-    shutil.rmtree(folder_name)
+
+# Merestart program jika dihentikan dengan tombol "stop"
+if not program_running:
+    subprocess.Popen(["python", "last.py"])
