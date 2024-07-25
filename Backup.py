@@ -11,6 +11,8 @@ from classess import classNames
 total_detected_objects = 0   # Total objek yang terdeteksi
 speed = 0                         # Kecepatan deteksi
 
+# ini hanya tes
+
 
 x = ["putih beras", "putih kuning"]
 y = ["sudut", "patahan", "bakpao", "oval", "mangkok"]
